@@ -12,7 +12,7 @@ namespace Common {
   constexpr size_t ME_MAX_MARKET_UPDATES = 256 * 1024;
 
   constexpr size_t ME_MAX_NUM_CLIENTS = 256;
-  constexpr size_t ME_MAX_ORDER_IDS = 1024 * 1024;
+  constexpr size_t ME_MAX_ORDER_IDS = 1024 * 1024;//表示**单个**交易工具ticker_id可能的最大订单数量。
   constexpr size_t ME_MAX_PRICE_LEVELS = 256;//撮合引擎维护的限价订单簿（limit order book）的最大价格深度。
 
   typedef uint64_t OrderId;
