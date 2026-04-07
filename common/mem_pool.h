@@ -2,71 +2,72 @@
 
 #include <cstdint>
 #include <vector>
+#include <string>
+#include <utility>
 
 namespace Common {
   template<typename T>
   class MemPool final {
+  private:
+    union Block {
+      T object_;
+      uint32_t next_free_index_;
+
+      // 【核心魔法】：因为 T 可能是非平凡类型（有自定义构造/析构）
+      // 编译器会默认 delete 掉 Block 的构造和析构。
+      // 我们必须显式提供空的实现，告诉编译器：“内存分配时什么都不用做，生命周期由我手动管理”。
+      Block() {}  
+      ~Block() {} 
+    };
+
+    std::vector<Block> store_;
+    uint32_t next_free_index_ = 0;
+
   public:
-    explicit MemPool(std::size_t num_elems) :
-        store_(num_elems, {T(), true}) /* pre-allocation of vector storage. */ {
-      ASSERT(reinterpret_cast<const ObjectBlock *>(&(store_[0].object_)) == &(store_[0]), "T object should be first member of ObjectBlock.");
-    }
-
-    /*申请小块*/
-    template<typename... Args>
-    T *allocate(Args... args) noexcept {
-      auto obj_block = &(store_[next_free_index_]);
-      ASSERT(obj_block->is_free_, "Expected free ObjectBlock at index:" + std::to_string(next_free_index_));
-      T *ret = &(obj_block->object_);
-      ret = new(ret) T(args...); // placement new.
-      obj_block->is_free_ = false;
-
-      updateNextFreeIndex();//指向下一个空闲的小块
-
-      return ret;
-    }
-
-    /*归还小块*/
-    auto deallocate(const T *elem) noexcept {
-      const auto elem_index = (reinterpret_cast<const ObjectBlock *>(elem) - &store_[0]);//指针运算
-      ASSERT(elem_index >= 0 && static_cast<size_t>(elem_index) < store_.size(), "Element being deallocated does not belong to this Memory pool.");
-      ASSERT(!store_[elem_index].is_free_, "Expected in-use ObjectBlock at index:" + std::to_string(elem_index));
-      store_[elem_index].is_free_ = true;
-    }
-
-    auto updateNextFreeIndex() noexcept {
-      const auto initial_free_index = next_free_index_;
-      while (!store_[next_free_index_].is_free_) {
-        ++next_free_index_;
-        if (UNLIKELY(next_free_index_ == store_.size())) { // hardware branch predictor should almost always predict this to be false any ways.
-          next_free_index_ = 0;
-        }
-        if (UNLIKELY(initial_free_index == next_free_index_)) {
-          ASSERT(initial_free_index != next_free_index_, "Memory Pool out of space.");
-        }
+    explicit MemPool(std::size_t num_elems) : 
+        store_(num_elems) /* 触发 Block() 空构造，仅分配虚拟内存 */ {
+      
+      // 初始化空闲索引单链表，分配物理内存
+      for (std::size_t i = 0; i < num_elems - 1; ++i) {
+          // 随着 i 的增长，每跨越 4KB，就会触发一次缺页中断。
+        store_[i].next_free_index_ = i + 1;
       }
+      // 最后一个节点的 next 指向一个无效值代表链表尾部
+      store_[num_elems - 1].next_free_index_ = 0xFFFFFFFF;
     }
 
-    // Deleted default, copy & move constructors and assignment-operators.
+    template<typename... Args>
+    T *allocate(Args&&... args) noexcept {
+      ASSERT(next_free_index_ != 0xFFFFFFFF, "Memory Pool out of space.");
+      
+      // O(1) 弹栈
+      uint32_t index = next_free_index_;
+      next_free_index_ = store_[index].next_free_index_;
+
+      // 在准确的内存位置上原地构造对象
+      T *ret = &store_[index].object_;
+      return new(ret) T(std::forward<Args>(args)...); 
+    }
+
+    // 去掉 const，语义更严谨
+    auto deallocate(T *elem) noexcept {
+      // 1. O(1) 反向寻址，算出 index
+      const auto elem_index = (reinterpret_cast<const Block *>(elem) - &store_[0]);
+      ASSERT(elem_index >= 0 && static_cast<size_t>(elem_index) < store_.size(), 
+             "Element being deallocated does not belong to this Memory pool.");
+
+      // 2. 显式调用析构函数，安全清理 T 内部可能存在的资源：防御性编程
+      elem->~T(); 
+
+      // 3. O(1) 压栈：将该内存块的身份从 object_ 切换回 next_free_index_
+      store_[elem_index].next_free_index_ = next_free_index_;
+      next_free_index_ = static_cast<uint32_t>(elem_index);
+    }
+
     MemPool() = delete;
     MemPool(const MemPool &) = delete;
     MemPool(const MemPool &&) = delete;
     MemPool &operator=(const MemPool &) = delete;
     MemPool &operator=(const MemPool &&) = delete;
-
-  private:
-    // It is better to have one vector of structs with two objects than two vectors of one object.
-    // Consider how these are accessed and cache performance.
-    struct ObjectBlock {
-      T object_;
-      bool is_free_ = true;
-    };
-
-    // We could've chosen to use a std::array that would allocate the memory on the stack instead of the heap.
-    // We would have to measure to see which one yields better performance.
-    // It is good to have objects on the stack but performance starts getting worse as the size of the pool increases.
-    std::vector<ObjectBlock> store_;
-
-    size_t next_free_index_ = 0;
   };
 }

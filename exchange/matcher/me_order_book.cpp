@@ -5,7 +5,7 @@
 namespace Exchange {
   MEOrderBook::MEOrderBook(TickerId ticker_id, Logger *logger, MatchingEngine *matching_engine)
       : ticker_id_(ticker_id), matching_engine_(matching_engine), orders_at_price_pool_(ME_MAX_PRICE_LEVELS), order_pool_(ME_MAX_ORDER_IDS),
-        logger_(logger) {
+        logger_(logger) {//初始化内存池的元素数量
   }
 
   MEOrderBook::~MEOrderBook() {
