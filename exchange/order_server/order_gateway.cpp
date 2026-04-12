@@ -1,4 +1,4 @@
-#include "order_gateway.h"
+#include "order_gateway.hpp"
 
 #include <iostream>
 #include <fcntl.h>
@@ -90,7 +90,8 @@ auto OrderGateway::run() noexcept -> void {
                 // 将结构体直接作为二进制流发送！真实 HFT 中，客户端也用 struct 直接强转接收
                 // 为了演示，我们将其格式化为字符串发回，方便 nc 客户端查看
                 std::string resp_str = response->toString() + "\n";
-                write(fd, resp_str.c_str(), resp_str.length());
+                ssize_t res = write(fd, resp_str.c_str(), resp_str.length());
+                (void)res;
             }
             outgoing_responses_->updateReadIndex(); // 释放无锁队列槽位
         }
@@ -131,7 +132,8 @@ auto OrderGateway::handleNewConnection() noexcept -> void {
 
         // 分配 ClientId 并建立双向极速映射
         ClientId cid = next_client_id_++;
-        if (cid < ME_MAX_NUM_CLIENTS && client_fd < fd_to_client_id_.size()) {
+        // if (cid < ME_MAX_NUM_CLIENTS && client_fd < fd_to_client_id_.size()) {
+        if (cid < ME_MAX_NUM_CLIENTS && static_cast<size_t>(client_fd) < fd_to_client_id_.size()) {
             client_id_to_fd_[cid] = client_fd;
             fd_to_client_id_[client_fd] = cid;
         } else {

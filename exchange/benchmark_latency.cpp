@@ -1,9 +1,10 @@
-// benchmark.cpp
+// exchange/benchmark_latency.cpp
 #include <iostream>
 #include <vector>
 #include <chrono>
 #include <algorithm>
 #include <numeric>
+#include <thread>
 
 #include "matcher/matching_engine.h"
 #include "common/time_utils.h"
@@ -14,12 +15,18 @@ using namespace Common;
 constexpr size_t NUM_ORDERS = 1000000;
 constexpr size_t QUEUE_SIZE = 1048576; // 2^20
 
+// ==========================================
+// 核心改进：设定目标 QPS，控制发包速率
+// ==========================================
+constexpr size_t TARGET_QPS = 100000; // 将发包率控制在 10 万笔/秒
+constexpr int64_t NANOS_PER_ORDER = 1000000000LL / TARGET_QPS;
+
 // 全局数组记录提交时间戳，用于计算端到端延迟
 std::vector<int64_t> submit_times(NUM_ORDERS, 0);
 std::vector<int64_t> latencies;
 
 int main() {
-    std::cout << "=== LightningMatch V2 Core Benchmark ===\n";
+    std::cout << "=== V2 Latency Benchmark (Fixed-Rate Injection) ===\n";
     
     // 1. 初始化无锁队列和引擎
     auto* incoming_requests = new ClientRequestLFQueue(QUEUE_SIZE);
@@ -45,11 +52,10 @@ int main() {
     latencies.reserve(NUM_ORDERS);
 
     // 3. 启动黑洞消费者线程 (Drainer & Latency Tracker)
-    // 必须有消费者读走引擎输出，否则引擎会被无锁队列堵死
-    std::thread sink_thread([&]() {
+    auto sink_thread = Common::createAndStartThread(3, "Benchmark/Sink", [&]() {
         size_t responses_handled = 0;
         while (responses_handled < NUM_ORDERS) {
-            // 处理客户端响应并计算延迟
+            // 不断抽干 outgoing_responses 和 outgoing_md_updates 队列
             auto resp = outgoing_responses->getNextToRead();
             if (resp) {
                 // 如果是接收确认，代表该订单在引擎中已经处理完毕一轮
@@ -64,7 +70,6 @@ int main() {
                 outgoing_responses->updateReadIndex();
             }
 
-            // 必须抽干行情队列，否则引擎写不进去
             auto md = outgoing_md_updates->getNextToRead();
             if (md) {
                 outgoing_md_updates->updateReadIndex();
@@ -72,31 +77,47 @@ int main() {
         }
     });
 
-    // 4. 启动撮合引擎 (它会绑定到 Core 1)
+    // 4. 启动撮合引擎
     engine.start();
 
-    std::cout << "Starting throughput and latency test...\n";
+    // 休眠 1 秒，确保线程都已绑核完毕且操作系统完成了所有缺页中断的分配
+    using namespace std::literals::chrono_literals;
+    std::this_thread::sleep_for(1s);
+
+    std::cout << "Starting LATENCY test at fixed rate of " << TARGET_QPS << " QPS...\n";
     
     auto start_time = std::chrono::steady_clock::now();
+    
+    // 初始化第一笔订单的发包时间
+    int64_t next_send_time = getCurrentNanos();
 
-    // 5. 极限压入订单 (Producer Loop)
+    // 5. 匀速压入订单 (Fixed-Rate Producer Loop)
     for (size_t i = 0; i < NUM_ORDERS; ++i) {
+        
+        // ==========================================
+        // 核心改进：极速自旋等待，直到触发下一个发车时间
+        // ==========================================
+        while (getCurrentNanos() < next_send_time) {
+            // CPU 空转 (Busy-wait) 以获得纳秒级的唤醒精度
+        }
+
         auto slot = incoming_requests->getNextToWriteTo();
-        while (!slot) { // 队列满了，自旋等待
-            slot = incoming_requests->getNextToWriteTo();
+        while (!slot) { 
+            slot = incoming_requests->getNextToWriteTo(); 
         }
 
         *slot = pre_generated[i]; // Zero-copy 赋值
         
-        // 记录发车时间！
+        // 记录真实的入队瞬间时间！
         submit_times[i] = getCurrentNanos();
-        
-        // 释放锁存，推给引擎
         incoming_requests->updateWriteIndex();
+
+        // 计划下一单的发车时间
+        next_send_time += NANOS_PER_ORDER;
     }
 
     // 6. 等待消费完毕
-    sink_thread.join();
+    sink_thread->join();
     auto end_time = std::chrono::steady_clock::now();
 
     engine.stop();
@@ -104,7 +125,9 @@ int main() {
     // 7. 计算统计指标
     std::chrono::duration<double> diff = end_time - start_time;
     double seconds = diff.count();
-    long long qps = static_cast<long long>(NUM_ORDERS / seconds);
+    
+    // 这里的实际 QPS 应该非常接近你设置的 TARGET_QPS
+    long long actual_qps = static_cast<long long>(NUM_ORDERS / seconds); 
 
     std::sort(latencies.begin(), latencies.end());
     
@@ -115,10 +138,9 @@ int main() {
     int64_t p999 = latencies[latencies.size() * 0.999];
 
     std::cout << "\n=== Version 2 Performance Results ===\n";
-    std::cout << "Total Orders Processed : " << NUM_ORDERS << "\n";
-    std::cout << "Total Time Elapsed     : " << seconds << " seconds\n";
-    std::cout << "Throughput (QPS)       : " << qps << " orders/sec\n";
-    std::cout << "\n=== Latency Percentiles (End-to-End Core) ===\n";
+    std::cout << "Target Injection Rate  : " << TARGET_QPS << " QPS\n";
+    std::cout << "Actual Throughput      : " << actual_qps << " orders/sec\n";
+    std::cout << "\n=== Latency Percentiles (End-to-End) ===\n";
     std::cout << "Average Latency  : " << avg_lat << " ns\n";
     std::cout << "P50 (Median)     : " << p50 << " ns\n";
     std::cout << "P90 Latency      : " << p90 << " ns\n";
