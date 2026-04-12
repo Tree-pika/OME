@@ -28,7 +28,7 @@ namespace Exchange {
 
   auto MatchingEngine::start() -> void {
     run_ = true;
-    ASSERT(Common::createAndStartThread(-1, "Exchange/MatchingEngine", [this]() { run(); }) != nullptr, "Failed to start MatchingEngine thread.");
+    ASSERT(Common::createAndStartThread(1, "Exchange/MatchingEngine", [this]() { run(); }) != nullptr, "Failed to start MatchingEngine thread.");
   }
 
   auto MatchingEngine::stop() -> void {

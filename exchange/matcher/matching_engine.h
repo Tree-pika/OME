@@ -47,26 +47,26 @@ namespace Exchange {
     }
     /*2.发布订单响应*/
     auto sendClientResponse(const MEClientResponse *client_response) noexcept {
-      logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), client_response->toString());
+      // logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), client_response->toString());
       auto next_write = outgoing_ogw_responses_->getNextToWriteTo();
       *next_write = std::move(*client_response);//
       outgoing_ogw_responses_->updateWriteIndex();
     }
     /*3.发布市场数据更新*/
     auto sendMarketUpdate(const MEMarketUpdate *market_update) noexcept {
-      logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), market_update->toString());
+      // logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), market_update->toString());
       auto next_write = outgoing_md_updates_->getNextToWriteTo();
       *next_write = *market_update;
       outgoing_md_updates_->updateWriteIndex();
     }
     /*撮合线程执行的主体循环*/
     auto run() noexcept {
-      logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+      // logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
       while (run_) {
         const auto me_client_request = incoming_requests_->getNextToRead();//1.
         if (LIKELY(me_client_request)) {
-          logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
-                      me_client_request->toString());
+          // logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+          //             me_client_request->toString());
           processClientRequest(me_client_request);//2.
           incoming_requests_->updateReadIndex();//3.
         }
