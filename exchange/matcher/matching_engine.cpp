@@ -27,11 +27,13 @@ namespace Exchange {
   }
 
   auto MatchingEngine::start() -> void {
-    run_ = true;
+    // 主线程写入，使用 release 语义
+    running_.store(true, std::memory_order_release);
     ASSERT(Common::createAndStartThread(1, "Exchange/MatchingEngine", [this]() { run(); }) != nullptr, "Failed to start MatchingEngine thread.");
   }
 
   auto MatchingEngine::stop() -> void {
-    run_ = false;
+    //主线程写入，使用 release 语义
+    running_.store(false, std::memory_order_release);
   }
 }

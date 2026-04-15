@@ -39,6 +39,6 @@ namespace Exchange {
     int udp_socket_ = -1;
     sockaddr_in multicast_addr_{};
     
-    volatile bool running_ = false;
+    alignas(64) std::atomic<bool> running_{false};//
   };
 }

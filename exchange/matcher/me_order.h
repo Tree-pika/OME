@@ -31,7 +31,7 @@ namespace Exchange {
     auto toString() const -> std::string;
   };
 
-  typedef std::array<MEOrder *, ME_MAX_ORDER_IDS> OrderHashMap;//market_order_id_--MEOrder
+  typedef std::array<MEOrder *, ME_MAX_ORDER_IDS> OrderHashMap;//client_order_id_--MEOrder
   typedef std::array<OrderHashMap, ME_MAX_NUM_CLIENTS> ClientOrderHashMap;//ClientID--OrderHashMap
 
   struct MEOrdersAtPrice {

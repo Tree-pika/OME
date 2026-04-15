@@ -56,13 +56,14 @@ namespace Exchange {
     auto sendMarketUpdate(const MEMarketUpdate *market_update) noexcept {
       // logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), market_update->toString());
       auto next_write = outgoing_md_updates_->getNextToWriteTo();
-      *next_write = *market_update;
+      *next_write = std::move(*market_update);//
       outgoing_md_updates_->updateWriteIndex();
     }
     /*撮合线程执行的主体循环*/
     auto run() noexcept {
       // logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
-      while (run_) {
+      //工作线程读取，使用 acquire 语义
+      while (running_.load(std::memory_order_acquire)) {
         const auto me_client_request = incoming_requests_->getNextToRead();//1.
         if (LIKELY(me_client_request)) {
           // logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
@@ -93,7 +94,7 @@ namespace Exchange {
     ClientResponseLFQueue *outgoing_ogw_responses_ = nullptr;//订单响应
     MEMarketUpdateLFQueue *outgoing_md_updates_ = nullptr;//更新市场
 
-    volatile bool run_ = false;//volatile
+    alignas(64) std::atomic<bool> running_{false};//
 
     std::string time_str_;
     Logger logger_;

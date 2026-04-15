@@ -36,19 +36,20 @@ auto MarketDataPublisher::initSocket(const std::string& multicast_ip, int port) 
 }
 
 auto MarketDataPublisher::start() -> void {
-    running_ = true;
-    // 将行情网关死死钉在 Core 2 上！
-    // 这样它怎么空转都不会抢占 OGW(Core 0) 和 ME(Core 1) 的算力。
+    //主线程写入，使用 release 语义
+    running_.store(true, std::memory_order_release);
     ASSERT(Common::createAndStartThread(2, "Exchange/MarketDataPublisher", [this]() { run(); }) != nullptr, 
            "Failed to start MarketDataPublisher thread.");
 }
 
 auto MarketDataPublisher::stop() -> void {
-    running_ = false;
+    //主线程写入，使用 release 语义
+    running_.store(false, std::memory_order_release);
 }
 
 auto MarketDataPublisher::run() noexcept -> void {
-    while (running_) {
+    //工作线程读取，使用 acquire 语义
+    while (running_.load(std::memory_order_acquire)) {
         // ==========================================================
         // 动作 1：轮询引擎吐出的行情更新队列 (Engine -> Market)
         // ==========================================================

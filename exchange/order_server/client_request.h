@@ -41,13 +41,13 @@ namespace Exchange {
       std::stringstream ss;
       ss << "MEClientRequest"
          << " ["
-         << "type:" << clientRequestTypeToString(type_)
+         << "type:" << clientRequestTypeToString(type_)//
          << " client:" << clientIdToString(client_id_)
-         << " ticker:" << tickerIdToString(ticker_id_)
+         << " ticker:" << tickerIdToString(ticker_id_)//
          << " oid:" << orderIdToString(order_id_)
-         << " side:" << sideToString(side_)
-         << " qty:" << qtyToString(qty_)
-         << " price:" << priceToString(price_)
+         << " side:" << sideToString(side_)//
+         << " qty:" << qtyToString(qty_)//
+         << " price:" << priceToString(price_)//
          << "]";
       return ss.str();
     }

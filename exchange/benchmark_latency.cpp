@@ -26,6 +26,7 @@ std::vector<int64_t> submit_times(NUM_ORDERS, 0);
 std::vector<int64_t> latencies;
 
 int main() {
+    Common::setThreadCore(4);//main线程绑定到Core 4
     std::cout << "=== V2 Latency Benchmark (Fixed-Rate Injection) ===\n";
     
     // 1. 初始化无锁队列和引擎
@@ -51,7 +52,7 @@ int main() {
 
     latencies.reserve(NUM_ORDERS);
 
-    // 3. 启动黑洞消费者线程 (Drainer & Latency Tracker)
+    // 3. 启动黑洞消费者线程 (Drainer & Latency Tracker):Core 3
     auto sink_thread = Common::createAndStartThread(3, "Benchmark/Sink", [&]() {
         size_t responses_handled = 0;
         while (responses_handled < NUM_ORDERS) {

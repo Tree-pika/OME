@@ -5,8 +5,7 @@
 #include <unistd.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <cstring>
-#include <sstream>
+#include <cstring> // 为了使用 std::memmove
 
 namespace Exchange {
 
@@ -18,18 +17,20 @@ OrderGateway::OrderGateway(int port,
       outgoing_responses_(outgoing_responses) {
     
     client_id_to_fd_.fill(-1);
-    fd_to_client_id_.fill(ClientId_INVALID);
-
-    // 初始化测试用的 Ticker 映射 (假设 0 是 AAPL, 1 是 TSLA)
-    ticker_name_to_id_["AAPL"] = 0;
-    ticker_name_to_id_["TSLA"] = 1;
+    
+    // 初始化上下文数组：内存预热
+    for (auto& ctx : clients_) {
+        ctx.fd = -1;
+        ctx.client_id = ClientId_INVALID;
+        ctx.buf_len = 0;
+    }
 
     // 1. 创建 Server Socket
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT(server_fd_ >= 0, "Failed to create socket.");
 
     int opt = 1;
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));//?
+    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));//？
     setNonBlockingAndNoDelay(server_fd_);
 
     sockaddr_in address{};
@@ -57,29 +58,29 @@ OrderGateway::~OrderGateway() {
 }
 
 auto OrderGateway::start() -> void {
-    running_ = true;
-    // 使用你封装的底层线程工具，将网关死死钉在 Core 0 上
+    running_.store(true, std::memory_order_release);
+    // 绑核 Core 0
     ASSERT(Common::createAndStartThread(0, "Exchange/OrderGateway", [this]() { run(); }) != nullptr, 
            "Failed to start OrderGateway thread.");
 }
 
 auto OrderGateway::stop() -> void {
-    running_ = false;
+    running_.store(false, std::memory_order_release);
 }
 
 auto OrderGateway::setNonBlockingAndNoDelay(int fd) noexcept -> void {
     int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK); // 非阻塞socket
 
-    int opt = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+    int opt = 1; 
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));// 禁用 Nagle 算法：小包及时发送
 }
 
 auto OrderGateway::run() noexcept -> void {
     constexpr int MAX_EVENTS = 256;
     struct epoll_event events[MAX_EVENTS];
 
-    while (running_) {
+    while (running_.load(std::memory_order_acquire)) {
         // ==========================================================
         // 动作 1：无锁轮询引擎的响应队列 (Engine -> Client)
         // ==========================================================
@@ -87,18 +88,15 @@ auto OrderGateway::run() noexcept -> void {
         if (LIKELY(response)) {
             int fd = client_id_to_fd_[response->client_id_];
             if (LIKELY(fd >= 0)) {
-                // 将结构体直接作为二进制流发送！真实 HFT 中，客户端也用 struct 直接强转接收
-                // 为了演示，我们将其格式化为字符串发回，方便 nc 客户端查看
-                std::string resp_str = response->toString() + "\n";
-                ssize_t res = write(fd, resp_str.c_str(), resp_str.length());
+                // ⭐零序列化开销：直接将 MEClientResponse 结构体的内存块作为二进制流发走！
+                ssize_t res = write(fd, reinterpret_cast<const char*>(response), sizeof(MEClientResponse));
                 (void)res;
             }
-            outgoing_responses_->updateReadIndex(); // 释放无锁队列槽位
+            outgoing_responses_->updateReadIndex();
         }
 
         // ==========================================================
         // 动作 2：非阻塞轮询网卡事件 (Client -> Engine)
-        // 注意：这里的 timeout 参数是 0！绝不休眠！
         // ==========================================================
         int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, 0);
         
@@ -113,13 +111,13 @@ auto OrderGateway::run() noexcept -> void {
 }
 
 auto OrderGateway::handleNewConnection() noexcept -> void {
-    while (true) { // ET 模式下必须循环 accept 直到 EAGAIN
+    while (true) {
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd_, (struct sockaddr*)&client_addr, &client_len);
 
         if (client_fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;//数据读干了
             return;
         }
 
@@ -130,88 +128,100 @@ auto OrderGateway::handleNewConnection() noexcept -> void {
         event.data.fd = client_fd;
         epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event);
 
-        // 分配 ClientId 并建立双向极速映射
-        ClientId cid = next_client_id_++;
-        // if (cid < ME_MAX_NUM_CLIENTS && client_fd < fd_to_client_id_.size()) {
-        if (cid < ME_MAX_NUM_CLIENTS && static_cast<size_t>(client_fd) < fd_to_client_id_.size()) {
+        ClientId cid = next_client_id_++;//全交易所唯一的client_id_
+        if (cid < ME_MAX_NUM_CLIENTS && static_cast<size_t>(client_fd) < clients_.size()) {
             client_id_to_fd_[cid] = client_fd;
-            fd_to_client_id_[client_fd] = cid;
+            
+            // 初始化该连接专属的接收缓冲区上下文
+            clients_[client_fd].fd = client_fd;
+            clients_[client_fd].client_id = cid;
+            clients_[client_fd].buf_len = 0;
         } else {
-            close(client_fd); // 超过系统最大承载能力
+            close(client_fd);//超过系统承载上限
         }
     }
 }
 
 auto OrderGateway::handleClientData(int client_fd) noexcept -> void {
-    char buffer[1024];
+    ClientContext& ctx = clients_[client_fd];
 
     while (true) { // ET 模式：榨干内核缓冲区
-        ssize_t count = read(client_fd, buffer, sizeof(buffer) - 1);
+        // 防御性编程：防止被恶意攻击或代码 Bug 导致的缓冲区溢出
+        if (UNLIKELY(ctx.buf_len >= BUFFER_SIZE)) {
+            ClientId cid = ctx.client_id;
+            if (cid != ClientId_INVALID) client_id_to_fd_[cid] = -1;
+            close(client_fd);
+            ctx.fd = -1;
+            ctx.client_id = ClientId_INVALID;
+            ctx.buf_len = 0;
+            return;
+        }
+
+        // 直接读入该连接的专属缓冲区尾部
+        ssize_t count = read(client_fd, ctx.buffer + ctx.buf_len, BUFFER_SIZE - ctx.buf_len);
 
         if (count < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 读干了
-            // 连接错误，清理资源
-            ClientId cid = fd_to_client_id_[client_fd];
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // 当前内核缓冲区读干了
+            
+            // 发生网络错误，清理资源
+            ClientId cid = ctx.client_id;
             if (cid != ClientId_INVALID) client_id_to_fd_[cid] = -1;
-            fd_to_client_id_[client_fd] = ClientId_INVALID;
             close(client_fd);
+            ctx.fd = -1;
+            ctx.client_id = ClientId_INVALID;
+            ctx.buf_len = 0;
             break;
         } else if (count == 0) {
             // 客户端主动断开
-            ClientId cid = fd_to_client_id_[client_fd];
+            ClientId cid = ctx.client_id;
             if (cid != ClientId_INVALID) client_id_to_fd_[cid] = -1;
-            fd_to_client_id_[client_fd] = ClientId_INVALID;
             close(client_fd);
+            ctx.fd = -1;
+            ctx.client_id = ClientId_INVALID;
+            ctx.buf_len = 0;
             break;
         }
 
-        buffer[count] = '\0'; // 加上字符串结束符，方便文本解析
+        ctx.buf_len += count;
 
         // ==========================================================
-        // 零拷贝解析核心 (Zero-Copy Parsing)
+        // 二进制流粘包处理与极致推送核心
         // ==========================================================
-        // 我们直接向无锁队列索要要写入的内存指针，直接在槽位上原地构造对象！
-        auto request_slot = incoming_requests_->getNextToWriteTo();
-        if (UNLIKELY(!request_slot)) {
-            // 背压 (Backpressure)：撮合引擎消费太慢，队列满了
-            // 真实场景中，这里应记录 Drop 日志或将数据暂存。
-            continue; 
+        size_t offset = 0;
+        
+        // 只要收到的数据长度 >= 一个完整的 MEClientRequest 结构体大小
+        while (ctx.buf_len - offset >= CLIENT_REQUEST_SIZE) {
+            
+            auto request_slot = incoming_requests_->getNextToWriteTo();
+            if (UNLIKELY(!request_slot)) {
+                // 【背压（Backpressure）机制】
+                // 引擎处理拥堵，队列已满。跳出解析循环，已满包和半包都会留在 buffer 里，
+                // 等待下一次 epoll 唤醒时继续重试。
+                break; 
+            }
+
+            // 1. 极速内存拷贝：将二进制流直接强转覆盖到无锁队列的内存上！
+            *request_slot = *reinterpret_cast<const MEClientRequest*>(ctx.buffer + offset);
+
+            // 2. 防伪造覆写：绝对不信任网络端传来的 ClientId，强制使用底层系统映射
+            request_slot->client_id_ = ctx.client_id;
+
+            // 3. 内存屏障，发布数据给引擎撮合线程
+            incoming_requests_->updateWriteIndex();
+
+            offset += CLIENT_REQUEST_SIZE;
         }
 
-        // --- 简单文本解析逻辑 (假设输入如 "NEW AAPL 1 BUY 150 100\n") ---
-        // 格式：Type Ticker ClientOrderId Side Price Qty
-        std::stringstream ss(buffer);
-        std::string type_str, ticker_str, side_str;
-        OrderId cid_order_id;
-        Price price;
-        Qty qty;
-
-        ss >> type_str >> ticker_str >> cid_order_id >> side_str >> price >> qty;
-
-        // 1. 原地赋值，没有任何 MEClientRequest 的局部变量和 Copy 操作！
-        if (type_str == "NEW") request_slot->type_ = ClientRequestType::NEW;
-        else if (type_str == "CANCEL") request_slot->type_ = ClientRequestType::CANCEL;
-        else request_slot->type_ = ClientRequestType::INVALID;
-
-        request_slot->client_id_ = fd_to_client_id_[client_fd];
-        
-        if (ticker_name_to_id_.find(ticker_str) != ticker_name_to_id_.end()) {
-            request_slot->ticker_id_ = ticker_name_to_id_[ticker_str];
-        } else {
-            request_slot->ticker_id_ = TickerId_INVALID;
+        // ==========================================================
+        // 二进制流半包 / 背压残留处理
+        // ==========================================================
+        if (offset > 0) {
+            ctx.buf_len -= offset;
+            if (ctx.buf_len > 0) {
+                // 使用 memmove 将剩下的碎片挪回缓冲区的物理头部，准备下一次拼接
+                std::memmove(ctx.buffer, ctx.buffer + offset, ctx.buf_len);
+            }
         }
-
-        request_slot->order_id_ = cid_order_id;
-        
-        if (side_str == "BUY") request_slot->side_ = Side::BUY;
-        else if (side_str == "SELL") request_slot->side_ = Side::SELL;
-        else request_slot->side_ = Side::INVALID;
-
-        request_slot->price_ = price;
-        request_slot->qty_ = qty;
-
-        // 2. 发布数据：触发 memory_order_release，撮合线程立刻可见！
-        incoming_requests_->updateWriteIndex();
     }
 }
 

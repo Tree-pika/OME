@@ -19,6 +19,7 @@ std::vector<int64_t> submit_times(NUM_ORDERS, 0);
 std::vector<int64_t> latencies;
 
 int main() {
+    Common::setThreadCore(4);//main线程绑定到Core 4
     std::cout << "=== V2 Throughput Benchmark (Max Injection) ===\n";
     
     // 1. 初始化无锁队列和引擎

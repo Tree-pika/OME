@@ -41,7 +41,7 @@ namespace Exchange {
 
     MatchingEngine *matching_engine_ = nullptr;
 
-    ClientOrderHashMap cid_oid_to_order_;//用于通过客户ID（ClientId）键来追踪OrderHashMap对象。再通过订单ID（OrderId market_order_id_）键来追踪MEOrder对象。
+    ClientOrderHashMap cid_oid_to_order_;//用于通过客户ID（ClientId）键来追踪OrderHashMap对象。再通过订单ID（OrderId order_id_ = client_order_id_）键来追踪MEOrder对象。
 
     MemPool<MEOrdersAtPrice> orders_at_price_pool_;//用于创建新对象，并将不再使用的对象返还到内存池。
     MEOrdersAtPrice *bids_by_price_ = nullptr;
